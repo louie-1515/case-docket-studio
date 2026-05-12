@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>案件智能分析台</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/chat-thinking.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <section id="case-entry-cover" class="case-entry-cover">
+        <div class="entry-hero">
+            <div class="entry-hero-copy">
+                <div class="entry-kicker">案件智能分析台</div>
+                <h1>先选案件，再进入工作台</h1>
+                <p>新案件从整本证据卷自动建库；旧案件直接回到检索、图谱、GraphRAG 和小扣聊天。</p>
+            </div>
+            <div class="entry-visual" aria-hidden="true">
+                <div class="entry-visual-sheet sheet-a"></div>
+                <div class="entry-visual-sheet sheet-b"></div>
+                <div class="entry-visual-line"></div>
+                <div class="entry-visual-node node-a"></div>
+                <div class="entry-visual-node node-b"></div>
+                <div class="entry-visual-node node-c"></div>
+            </div>
+        </div>
+
+        <div class="entry-actions">
+            <button id="btn-entry-new-case" class="entry-action-card" type="button">
+                <span class="entry-action-title">建立新案件</span>
+                <span class="entry-action-desc">配置接口、选择证据卷 PDF，并启动自动 MinerU 建库。</span>
+            </button>
+            <button id="btn-entry-old-case" class="entry-action-card" type="button">
+                <span class="entry-action-title">进入旧案件</span>
+                <span class="entry-action-desc">从已有案件库中选择一个案件，直接进入工作台。</span>
+            </button>
+        </div>
+
+        <section id="entry-old-panel" class="entry-panel hidden">
+            <div class="entry-panel-header">
+                <div>
+                    <h2>选择已有案件</h2>
+                    <p>进入后仍可在系统顶部切换其他案件。</p>
+                </div>
+                <button id="btn-open-trash" class="btn btn-small" type="button">废纸篓</button>
+            </div>
+            <div id="entry-case-list" class="entry-case-list"></div>
+        </section>
+
+        <section id="entry-trash-panel" class="entry-panel hidden">
+            <div class="entry-panel-header">
+                <div>
+                    <h2>废纸篓</h2>
+                    <p>删除的案件保留 7 天，过期自动彻底删除。</p>
+                </div>
+                <button id="btn-back-from-trash" class="btn btn-small" type="button">← 返回案件列表</button>
+            </div>
+            <div id="entry-trash-list" class="entry-case-list"></div>
+        </section>
+
+        <section id="entry-new-panel" class="entry-panel new-case-wizard hidden">
+            <div class="entry-panel-header">
+                <div>
+                    <h2>建立新案件</h2>
+                    <p>已有配置可以直接跳过，只选择证据卷 PDF 开始建库。</p>
+                </div>
+            </div>
+            <div class="new-case-grid">
+                <div class="new-case-step">
+                    <div class="new-case-step-title">1. 案件名称</div>
+                    <div class="form-row">
+                        <label for="new-case-name">案件名称</label>
+                        <input id="new-case-name" type="text" placeholder="例如：某某涉嫌某某罪案">
+                    </div>
+                </div>
+                <div class="new-case-step">
+                    <div class="new-case-step-title">2. 接口配置</div>
+                    <label class="checkbox-label entry-skip-config">
+                        <input id="new-case-use-existing-config" type="checkbox">
+                        <span>使用已有 AI / MinerU 配置，跳过本步</span>
+                    </label>
+                    <div id="new-case-config-fields" class="new-case-config-fields">
+                        <div class="ai-config-cols">
+                            <div class="ai-config-col">
+                                <div class="ai-config-col-title">强 AI</div>
+                                <div class="form-row">
+                                    <label for="new-strong-base-url">Base URL</label>
+                                    <input id="new-strong-base-url" type="text" placeholder="https://api.example.com/v1">
+                                </div>
+                                <div class="form-row">
+                                    <label for="new-strong-model">模型</label>
+                                    <input id="new-strong-model" type="text" placeholder="例如：deepseek-v4-pro">
+                                </div>
+                                <div class="form-row">
+                                    <label for="new-strong-api-key">API Key</label>
+                                    <input id="new-strong-api-key" type="password" placeholder="必填">
+                                </div>
+                            </div>
+                            <div class="ai-config-col">
+                                <div class="ai-config-col-title">弱 AI</div>
+                                <div class="form-row">
+                                    <label for="new-cheap-base-url">Base URL</label>
+                                    <input id="new-cheap-base-url" type="text" placeholder="https://api.example.com/v1">
+                                </div>
+                                <div class="form-row">
+                                    <label for="new-cheap-model">模型</label>
+                                    <input id="new-cheap-model" type="text" placeholder="例如：qwen-plus">
+                                </div>
+                                <div class="form-row">
+                                    <label for="new-cheap-api-key">API Key</label>
+                                    <input id="new-cheap-api-key" type="password" placeholder="必填">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-row" style="margin-top:12px">
+                            <label for="new-mineru-api-token">MinerU Token</label>
+                            <div class="token-row">
+                                <input id="new-mineru-api-token" type="password" placeholder="必须配置；已保存可留空">
+                                <a class="btn btn-secondary btn-inline token-link" href="https://mineru.net/apiManage/token" target="_blank" rel="noopener">申请 Token</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="new-case-step">
+                    <div class="new-case-step-title">3. 材料上传</div>
+                    <div class="form-row">
+                        <label for="new-case-raw-pdf">证据卷 PDF</label>
+                        <div class="path-picker-row">
+                            <input id="new-case-raw-pdf" type="text" placeholder="例如：E:\案件材料\证据卷.pdf">
+                            <button id="btn-pick-new-case-pdf" type="button" class="btn btn-secondary btn-inline">选择文件</button>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <label for="new-document-type">文书材料类型</label>
+                        <select id="new-document-type">
+                            <option value="direct">直接上传起诉书 / 起诉意见书</option>
+                            <option value="volume">上传带目录的文书卷</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label for="new-document-pdf">文书材料 PDF</label>
+                        <div class="path-picker-row">
+                            <input id="new-document-pdf" type="text" placeholder="例如：E:\案件材料\文书卷.pdf">
+                            <button id="btn-pick-new-document-pdf" type="button" class="btn btn-secondary btn-inline">选择文件</button>
+                        </div>
+                    </div>
+                    <div class="new-case-hint">证据卷页码偏移由系统自动判断，不需要手动填写。</div>
+                    <button id="btn-create-case-start-build" class="btn btn-primary">创建案件并开始建库</button>
+                </div>
+            </div>
+        </section>
+
+        <section id="entry-build-progress" class="entry-panel hidden">
+            <div class="entry-panel-header">
+                <div>
+                    <h2>自动建库中</h2>
+                    <p>正在解析文书材料、拆分笔录、OCR 识别，请稍候...</p>
+                </div>
+            </div>
+            <div class="build-progress-area">
+                <div class="build-progress-bar">
+                    <div id="build-progress-fill" class="build-progress-fill" style="width: 0%"></div>
+                </div>
+                <div id="build-progress-stage" class="build-progress-stage">准备中...</div>
+                <div id="build-progress-detail" class="build-progress-detail"></div>
+            </div>
+        </section>
+
+        <section id="entry-client-select" class="entry-panel hidden">
+            <div class="entry-panel-header">
+                <div>
+                    <h2>选择委托人</h2>
+                    <p>系统已从起诉书/起诉意见书中提取当事人，请确认本案委托人。后续摘要和图谱将以委托人为中心。</p>
+                </div>
+            </div>
+            <div class="client-select-area">
+                <div id="client-candidate-chips" class="client-candidate-chips"></div>
+                <div class="form-row">
+                    <label for="confirm-client-name">委托人姓名</label>
+                    <input id="confirm-client-name" type="text" list="confirm-client-datalist" placeholder="从上方选择或手动输入">
+                    <datalist id="confirm-client-datalist"></datalist>
+                </div>
+                <button id="btn-confirm-client" class="btn btn-primary">确认委托人并开始分析</button>
+            </div>
+        </section>
+
+        <section id="entry-analysis-progress" class="entry-panel hidden">
+            <div class="entry-panel-header">
+                <div>
+                    <h2>AI 分析中</h2>
+                    <p>正在以委托人为中心生成上下文、摘要和案情图谱...</p>
+                </div>
+            </div>
+            <div class="analysis-progress-area">
+                <div class="analysis-steps">
+                    <div class="analysis-step" data-step="case_context">
+                        <span class="analysis-step-icon">○</span>
+                        <span class="analysis-step-title">生成委托人上下文</span>
+                    </div>
+                    <div class="analysis-step" data-step="record_summaries">
+                        <span class="analysis-step-icon">○</span>
+                        <span class="analysis-step-title">批量生成笔录摘要</span>
+                    </div>
+                    <div class="analysis-step" data-step="person_summaries">
+                        <span class="analysis-step-icon">○</span>
+                        <span class="analysis-step-title">生成人物摘要</span>
+                    </div>
+                    <div class="analysis-step" data-step="graph">
+                        <span class="analysis-step-icon">○</span>
+                        <span class="analysis-step-title">生成案情图谱</span>
+                    </div>
+                </div>
+                <button id="btn-enter-workbench" class="btn btn-primary hidden">进入工作台</button>
+            </div>
+        </section>
+    </section>
+
+    <div id="app-shell" class="app hidden">
+        <header>
+            <h1>案件智能分析台</h1>
+            <div class="case-selector">
+                <label for="case-select">当前案件：</label>
+                <select id="case-select"></select>
+                <span id="record-count" class="badge"></span>
+                <button id="btn-open-new-case" class="btn btn-small" type="button">新建案件</button>
+            </div>
+        </header>
+
+        <div class="case-context-bar" id="case-context-bar">
+            <div class="case-context-main">
+                <span class="case-context-label">委托人</span>
+                <span id="case-context-client" class="case-context-client">未确认</span>
+                <span id="case-context-status" class="case-context-status"></span>
+            </div>
+            <button id="btn-open-case-setup" class="btn btn-small hidden" type="button">案件设置</button>
+        </div>
+
+        <!-- 视图切换 -->
+        <div class="view-tabs" id="view-tabs">
+            <div class="view-tab active" data-view="records">笔录列表</div>
+            <div class="view-tab" data-view="persons">人物视图</div>
+            <div class="view-tab" data-view="graph">案情图谱</div>
+            <div class="view-tab" data-view="indictment">起诉书</div>
+            <div class="view-tab" data-view="ai">AI 分析</div>
+            <div class="view-tab" data-view="evidence">证据材料</div>
+        </div>
+
+        <section class="workflow-panel hidden" id="workflow-panel">
+            <div class="workflow-panel-header">
+                <div>
+                    <div class="workflow-title">案件设置</div>
+                    <div class="workflow-note">这些设置通常只需要在导入案件后确认一次。</div>
+                </div>
+                <button id="btn-close-case-setup" class="btn btn-small">收起</button>
+            </div>
+            <div class="workflow-card">
+                <div class="workflow-title">当前办案流程</div>
+                <div class="workflow-steps">
+                    <span class="workflow-step is-done">1. 自动 MinerU 建库</span>
+                    <span class="workflow-step is-active">2. 确认委托人</span>
+                    <span class="workflow-step">3. GraphRAG 检索</span>
+                    <span class="workflow-step">4. AI 分析</span>
+                </div>
+                <div class="workflow-note">系统围绕委托当事人组织摘要、人物关系、案情图谱和检索问答。</div>
+            </div>
+            <div class="party-context-card">
+                <div class="party-context-header">
+                    <div>
+                        <div class="party-context-title">委托当事人</div>
+                        <div class="party-context-subtitle">先确定辩护服务对象，再进行后续分析</div>
+                    </div>
+                    <button id="btn-save-party-context" class="btn btn-primary party-save-btn">保存设置</button>
+                </div>
+                <div class="party-context-body">
+                    <div class="party-context-block">
+                        <div class="party-context-label">候选人物</div>
+                        <div id="party-context-options" class="party-context-options"></div>
+                    </div>
+                    <div class="party-context-block">
+                        <div class="party-context-label">当前委托人</div>
+                        <div id="party-context-current" class="party-context-current"></div>
+                    </div>
+                    <div class="party-context-block">
+                        <div class="party-context-label">涉案核心人物</div>
+                        <div id="party-context-related" class="party-context-related"></div>
+                    </div>
+                    <div class="party-context-block">
+                        <div class="party-context-label">起诉书简要主线</div>
+                        <div id="party-context-summary" class="party-context-summary"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 搜索区域 - 仅在笔录列表视图显示 -->
+        <div class="search-hero" id="search-hero">
+            <div class="search-hero-inner">
+                <input type="text" id="search-input" placeholder="输入关键词模糊搜索，如：委托人 交易时间 地点" autocomplete="off">
+                <button id="btn-search" class="btn btn-primary btn-search-hero">
+                    <span class="search-btn-text">搜索</span>
+                    <span class="search-btn-loading hidden"><span class="spinner"></span>搜索中...</span>
+                </button>
+            </div>
+            <div id="search-stats" class="search-stats hidden"></div>
+        </div>
+
+        <!-- 笔录列表视图 -->
+        <div id="view-records" class="view-content">
+            <div class="main">
+                <aside class="filters">
+                    <button id="btn-toggle-filters" class="btn-toggle-filters">
+                        <span>筛选条件</span>
+                        <span class="toggle-icon">&#9660;</span>
+                    </button>
+                    <div id="filters-body" class="filters-body">
+                        <div class="filter-group">
+                            <label>姓名</label>
+                            <select id="filter-name"><option value="">全部</option></select>
+                        </div>
+                        <div class="filter-group">
+                            <label>笔录类型</label>
+                            <select id="filter-type"><option value="">全部</option></select>
+                        </div>
+                        <div class="filter-group">
+                            <label>日期</label>
+                            <select id="filter-date"><option value="">全部</option></select>
+                        </div>
+                        <button id="btn-reset" class="btn btn-secondary">重置筛选</button>
+                    </div>
+                </aside>
+
+                <main class="content">
+                    <div id="status-bar" class="status-bar"></div>
+                    <div id="record-list" class="record-list"></div>
+                </main>
+            </div>
+        </div>
+
+        <!-- 人物视图 -->
+        <div id="view-persons" class="view-content hidden">
+            <div id="persons-status-bar" class="status-bar"></div>
+            <div id="person-list" class="person-list"></div>
+        </div>
+
+        <!-- 案情图谱视图 -->
+        <div id="view-graph" class="view-content hidden">
+            <div class="graph-toolbar">
+                <div class="graph-mode-switch">
+                    <button class="graph-mode-btn active" data-graph-mode="mindmap">办案导图</button>
+                    <button class="graph-mode-btn" data-graph-mode="network">关系网络</button>
+                </div>
+                <a id="btn-export-drawio" class="btn btn-secondary graph-export-btn" href="#" target="_blank" rel="noopener">导出 drawio</a>
+            </div>
+            <div class="graph-layout">
+                <div class="graph-sidebar hidden" id="graph-sidebar">
+                    <div class="graph-sidebar-header">
+                        <h3>当事人筛选</h3>
+                        <button id="btn-select-all-parties" class="btn btn-small">全选</button>
+                    </div>
+                    <div id="party-list" class="party-list"></div>
+                    <div class="graph-legend">
+                        <h4>图例</h4>
+                        <div class="legend-item"><span class="legend-dot" style="background:#2563eb"></span>人物</div>
+                        <div class="legend-item"><span class="legend-dot" style="background:#059669"></span>组织</div>
+                        <div class="legend-item"><span class="legend-dot" style="background:#d97706"></span>账户</div>
+                        <div class="legend-item"><span class="legend-dot" style="background:#64748b"></span>其他</div>
+                        <div class="legend-item"><span class="legend-line flow-goods"></span>货物流</div>
+                        <div class="legend-item"><span class="legend-line flow-money"></span>资金流</div>
+                        <div class="legend-item"><span class="legend-line flow-command"></span>指挥联络</div>
+                        <div class="legend-item"><span class="legend-line flow-evidence"></span>证据关系</div>
+                        <div class="legend-item"><span class="legend-line dashed"></span>间接关系</div>
+                    </div>
+                </div>
+                <div class="graph-container" id="graph-container">
+                    <div id="graph-empty" class="graph-empty hidden">暂无案情图谱数据</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 起诉书视图 -->
+        <div id="view-indictment" class="view-content hidden">
+            <div id="indictment-container" class="indictment-container">
+                <div id="indictment-empty" class="indictment-empty hidden">暂无起诉书数据</div>
+                <div id="indictment-content">
+                    <div id="indictment-structured" class="indictment-structured"></div>
+                    <div class="indictment-original-section">
+                        <button id="btn-toggle-original" class="btn btn-secondary indictment-toggle">
+                            <span id="toggle-original-text">展开原文</span>
+                        </button>
+                        <div id="indictment-original" class="indictment-original hidden"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+        <!-- AI 分析视图 -->
+        <div id="view-ai" class="view-content hidden">
+            <div class="workspace-grid ai-grid">
+                <section class="workspace-card">
+                    <div class="workspace-card-header">
+                        <div>
+                            <h2>强 AI</h2>
+                            <p>用于聊天、复核、图谱、辩护思路等重要分析。</p>
+                        </div>
+                        <button id="btn-test-strong-ai" class="btn btn-secondary btn-inline">测试连接</button>
+                    </div>
+                    <div class="settings-grid" data-profile="strong">
+                        <div class="form-row">
+                            <label>接口协议</label>
+                            <select id="strong-protocol">
+                                <option value="openai">OpenAI 兼容</option>
+                                <option value="anthropic">Anthropic 兼容</option>
+                            </select>
+                        </div>
+                        <div class="form-row">
+                            <label>Base URL</label>
+                            <input id="strong-base-url" type="text" placeholder="https://api.example.com/v1">
+                        </div>
+                        <div class="form-row">
+                            <label>模型</label>
+                            <input id="strong-model" type="text" placeholder="例如：gpt-4.1 / claude-3-5-sonnet">
+                        </div>
+                        <div class="form-row">
+                            <label>API Key</label>
+                            <input id="strong-api-key" type="password" placeholder="留空表示不修改">
+                        </div>
+                    </div>
+                </section>
+
+                <section class="workspace-card">
+                    <div class="workspace-card-header">
+                        <div>
+                            <h2>弱 AI</h2>
+                            <p>用于批量摘要、基础抽取、分类和脚本参数适配。</p>
+                        </div>
+                        <button id="btn-test-cheap-ai" class="btn btn-secondary btn-inline">测试连接</button>
+                    </div>
+                    <div class="settings-grid" data-profile="cheap">
+                        <div class="form-row">
+                            <label>接口协议</label>
+                            <select id="cheap-protocol">
+                                <option value="openai">OpenAI 兼容</option>
+                                <option value="anthropic">Anthropic 兼容</option>
+                            </select>
+                        </div>
+                        <div class="form-row">
+                            <label>Base URL</label>
+                            <input id="cheap-base-url" type="text" placeholder="https://api.example.com/v1">
+                        </div>
+                        <div class="form-row">
+                            <label>模型</label>
+                            <input id="cheap-model" type="text" placeholder="例如：gpt-4o-mini / qwen-plus">
+                        </div>
+                        <div class="form-row">
+                            <label>API Key</label>
+                            <input id="cheap-api-key" type="password" placeholder="留空表示不修改">
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <section class="workspace-card">
+                <div class="workspace-card-header">
+                    <div>
+                        <h2>模型路由</h2>
+                        <p>按任务复杂度自动分配强弱模型，后续多 agent 编排会沿用这里的设置。</p>
+                    </div>
+                    <button id="btn-save-ai-settings" class="btn btn-primary">保存 AI 配置</button>
+                </div>
+                <div class="route-grid">
+                    <div class="form-row">
+                        <label>聊天默认</label>
+                        <select id="route-chat-default">
+                            <option value="strong">强 AI</option>
+                            <option value="cheap">弱 AI</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>基础抽取默认</label>
+                        <select id="route-extract-default">
+                            <option value="cheap">弱 AI</option>
+                            <option value="strong">强 AI</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>复核默认</label>
+                        <select id="route-review-default">
+                            <option value="strong">强 AI</option>
+                            <option value="cheap">弱 AI</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
+
+            <section class="workspace-card">
+                <div class="workspace-card-header">
+                    <div>
+                        <h2>MinerU 云 API</h2>
+                        <p>自动建库会调用这里的 MinerU 云端解析配置，只保存到本机。</p>
+                    </div>
+                </div>
+                <div class="settings-grid">
+                    <div class="form-row">
+                        <label for="mineru-api-token">API Token</label>
+                        <div class="token-row">
+                            <input id="mineru-api-token" type="password" placeholder="必须配置；已保存可留空">
+                            <a class="btn btn-secondary btn-inline token-link" href="https://mineru.net/apiManage/token" target="_blank" rel="noopener">申请 Token</a>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <label for="mineru-poll-interval">轮询间隔（秒）</label>
+                        <input id="mineru-poll-interval" type="number" min="1" value="3">
+                    </div>
+                    <div class="form-row">
+                        <label for="mineru-timeout">超时时间（秒）</label>
+                        <input id="mineru-timeout" type="number" min="60" value="600">
+                    </div>
+                </div>
+            </section>
+
+            <section class="workspace-card graphrag-card">
+                <div class="workspace-card-header">
+                    <div>
+                        <h2>GraphRAG</h2>
+                    </div>
+                    <button id="btn-rebuild-graphrag" class="btn btn-secondary btn-inline">重建索引</button>
+                </div>
+                <div id="graphrag-status" class="graphrag-status"></div>
+                <div class="graphrag-query-row">
+                    <input id="graphrag-query" type="text" placeholder="输入要检索的问题">
+                    <button id="btn-test-graphrag" class="btn btn-primary btn-inline">检索</button>
+                </div>
+                <div id="graphrag-results" class="graphrag-results"></div>
+            </section>
+
+            <div class="workspace-grid ai-work-grid">
+                <section class="workspace-card chat-card">
+                    <div class="workspace-card-header">
+                        <div>
+                            <h2>案件 AI 聊天</h2>
+                            <p>聊天会自动带入当前案件、委托人、起诉书主线和 GraphRAG 检索证据。</p>
+                        </div>
+                        <select id="chat-profile">
+                            <option value="strong">强 AI</option>
+                            <option value="cheap">弱 AI</option>
+                        </select>
+                    </div>
+                    <div id="chat-messages" class="chat-messages"></div>
+                    <div class="chat-input-row">
+                        <textarea id="chat-input" rows="3" placeholder="例如：围绕委托人，哪些笔录最需要优先核对？"></textarea>
+                        <button id="btn-send-chat" class="btn btn-primary">发送</button>
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <!-- 证据材料视图 -->
+        <div id="view-evidence" class="view-content hidden">
+            <div class="evidence-toolbar">
+                <div class="evidence-toolbar-left">
+                    <select id="evidence-type-filter" class="form-select">
+                        <option value="">全部类型</option>
+                    </select>
+                    <button id="btn-evidence-select-all" class="btn btn-small">全选</button>
+                    <button id="btn-evidence-deselect-all" class="btn btn-small">取消</button>
+                </div>
+                <div class="evidence-toolbar-right">
+                    <span id="evidence-selected-count" class="evidence-count">已选 0 条</span>
+                    <button id="btn-evidence-parse" class="btn btn-primary">解析选中证据</button>
+                </div>
+            </div>
+            <div id="evidence-status-bar" class="status-bar"></div>
+            <div id="evidence-groups" class="evidence-groups"></div>
+        </div>
+
+        <!-- 笔录详情模态框 -->
+        <div id="modal" class="modal hidden">
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="modal-title"></h2>
+                    <button id="modal-close" class="btn-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="modal-citation" class="citation-box">
+                        <span id="modal-citation-text"></span>
+                        <button id="btn-copy" class="btn btn-small">复制引用</button>
+                    </div>
+                    <div id="modal-ai-summary" class="modal-ai-summary hidden">
+                        <div class="ai-summary-label">AI 摘要</div>
+                        <div id="modal-ai-summary-text" class="ai-summary-text"></div>
+                    </div>
+                    <div id="modal-content" class="record-content"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="back-home-widget" class="back-home-widget">
+            <button id="btn-back-to-entry" class="back-home-circle" type="button" title="返回首页">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 8L10 2L17 8V17H12V11H8V17H3V8Z"/>
+                </svg>
+            </button>
+            <span class="back-home-label">返回首页</span>
+        </div>
+
+        <div id="companion-widget" class="companion-widget">
+            <button id="companion-toggle" class="companion-toggle" type="button" aria-label="打开小扣聊天">
+                <span class="companion-dot"></span>
+                <span class="companion-name">小扣</span>
+                <span class="companion-ask">问我任何事</span>
+            </button>
+            <span class="companion-hint" id="companion-hint">有事儿就戳我~</span>
+            <section id="companion-panel" class="companion-panel hidden" aria-label="小扣聊天窗口">
+                <div class="companion-header">
+                    <div>
+                        <div class="companion-title">小扣</div>
+                        <div class="companion-subtitle">围绕当前案件随时提问</div>
+                    </div>
+                    <div class="companion-header-actions">
+                        <button id="btn-open-workspace" class="btn btn-small" type="button">📂 工作区</button>
+                        <select id="companion-profile" aria-label="选择聊天模型">
+                            <option value="strong">强 AI</option>
+                            <option value="cheap">弱 AI</option>
+                        </select>
+                        <button id="companion-close" class="btn btn-small" type="button">收起</button>
+                    </div>
+                </div>
+                <div id="companion-messages" class="companion-messages"></div>
+                <div class="companion-input-row">
+                    <textarea id="companion-input" rows="3" placeholder="问小扣：这份案卷里有哪些需要核对的矛盾点？"></textarea>
+                    <button id="btn-companion-send" class="btn btn-primary btn-inline" type="button">发送</button>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="/static/chat-thinking.js?v=3"></script>
+    <script src="/static/app.js?v=3"></script>
+</body>
+</html>

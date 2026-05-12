@@ -1,0 +1,209 @@
+/* ============================================
+   聊天思考状态 & 流式输出 — 克制专业风格
+   ============================================ */
+
+/* -------- 思考气泡 -------- */
+
+.think-bubble {
+    align-self: flex-start;
+    max-width: 92%;
+    padding: 14px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-sm);
+    animation: thinkEnter 0.2s ease-out;
+}
+
+@keyframes thinkEnter {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.think-bubble.is-exiting {
+    animation: thinkExit 0.18s ease-in forwards;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+@keyframes thinkExit {
+    from { opacity: 1; transform: scale(1); max-height: 120px; margin-bottom: 10px; }
+    to   { opacity: 0; transform: scale(0.97); max-height: 0; margin-bottom: 0; padding-top: 0; padding-bottom: 0; }
+}
+
+/* -------- 元信息行：spinner + label + timer -------- */
+
+.think-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.think-spinner {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    border: 2px solid #e2e8f0;
+    border-top-color: #475569;
+    border-radius: 50%;
+    animation: thinkSpin 0.65s linear infinite;
+    flex-shrink: 0;
+}
+
+@keyframes thinkSpin {
+    to { transform: rotate(360deg); }
+}
+
+.think-label {
+    font-size: 13px;
+    color: #1e293b;
+    font-weight: 500;
+    line-height: 1.5;
+}
+
+.think-timer {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-left: auto;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    min-width: 70px;           /* 防抖：预占宽度避免数字跳动 */
+    text-align: right;
+}
+
+/* -------- 阶段列表 -------- */
+
+.think-stages {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.think-stage {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #94a3b8;
+    transition: color 0.3s ease;
+    line-height: 1.5;
+}
+
+.think-stage.is-done {
+    color: #059669;
+}
+
+.think-stage.is-active {
+    color: #475569;
+}
+
+.stage-icon {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.stage-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #cbd5e1;
+    transition: background 0.3s ease, box-shadow 0.3s ease;
+}
+
+.think-stage.is-done .stage-dot {
+    background: #059669;
+}
+
+.think-stage.is-active .stage-dot {
+    background: #475569;
+    box-shadow: 0 0 0 3px rgba(71, 85, 105, 0.12);
+    animation: dotPulse 1.4s ease-out infinite;
+}
+
+@keyframes dotPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(71, 85, 105, 0.2); }
+    60%  { box-shadow: 0 0 0 8px rgba(71, 85, 105, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(71, 85, 105, 0); }
+}
+
+/* 阶段结果数强调 */
+.stage-em {
+    font-weight: 600;
+    color: #1e293b;
+}
+
+/* 阶段等待中（还没到这一步） */
+.think-stage.is-pending .stage-dot {
+    background: #e2e8f0;
+}
+
+/* -------- 流式输出消息 -------- */
+
+.chat-message.is-streaming {
+    border-left: 1px solid #cbd5e1;
+}
+
+.chat-message.is-streaming .chat-content {
+    position: relative;
+}
+
+.streaming-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    background: #475569;
+    vertical-align: text-bottom;
+    animation: cursorBlink 0.75s step-end infinite;
+}
+
+.streaming-cursor.is-done {
+    animation: none;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+}
+
+@keyframes cursorBlink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0; }
+}
+
+/* 流式内容使用与正常消息一致的排版 */
+.streaming-content {
+    font-size: 13px;
+    color: #1e293b;
+    line-height: 1.75;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* 流式消息初始化进入 */
+.chat-message.is-streaming {
+    animation: streamEnter 0.15s ease-out;
+}
+
+@keyframes streamEnter {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+/* -------- 思考超时提示 -------- */
+
+.think-timeout-hint {
+    font-size: 11px;
+    color: #d97706;
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid #fef3c7;
+    animation: timeoutShow 0.3s ease-out;
+}
+
+@keyframes timeoutShow {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}

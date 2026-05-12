@@ -1,0 +1,26 @@
+# AI 配置（含密钥模板，实际密钥不入库）
+project/config/ai_settings.json
+
+# 案件数据（仅保留 sample_data.json）
+project/data/*.json
+!project/data/sample_data.json
+
+# 运行时
+project/runtime/
+project/.server.pid
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 证据原文目录
+project/records/
+.pytest_cache/
