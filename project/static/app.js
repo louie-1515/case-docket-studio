@@ -2536,7 +2536,7 @@ function renderChatMessages() {
         return;
     }
     dom.chatMessages.innerHTML = state.chatMessages.map(item => {
-        const cleanContent = (item.content || '').replace(/\n?\[SAVE:[\s\S]*$/, '');
+        const cleanContent = (item.content || '').replace(/\n?\[(SAVE_RESULT|SAVE|BRIEF):[\s\S]*$/, '');
         return `
         <div class="chat-message ${item.role === 'user' ? 'is-user' : 'is-assistant'}">
             <div class="chat-role">${item.role === 'user' ? '我' : 'AI'} · ${escapeHtml(item.profile || '')}</div>
@@ -2600,7 +2600,7 @@ function renderCompanionMessages() {
         return;
     }
     dom.companionMessages.innerHTML = state.chatMessages.map(item => {
-        const cleanContent = (item.content || '').replace(/\n?\[SAVE:[\s\S]*$/, '');
+        const cleanContent = (item.content || '').replace(/\n?\[(SAVE_RESULT|SAVE|BRIEF):[\s\S]*$/, '');
         if (item.role === 'system') {
             return `
             <div class="chat-message is-system">
@@ -2896,11 +2896,13 @@ function injectRebuildConfirm(reason) {
 }
 
 async function handleChatMarkers(fullAnswer, originalQuestion) {
+    const saveResultMatch = fullAnswer.match(/\[SAVE_RESULT:\s*title=([^,]+),\s*format=(md|csv|txt)\]/);
     const saveMatch = fullAnswer.match(/\[SAVE:\s*title=([^,]+),\s*format=(md|csv|txt)\]/);
-    if (saveMatch) {
-        const contentBefore = fullAnswer.replace(/\[SAVE:[\s\S]*$/, '').trim();
-        const title = saveMatch[1].trim();
-        const format = saveMatch[2].trim();
+    const activeSave = saveResultMatch || saveMatch;
+    if (activeSave) {
+        const contentBefore = fullAnswer.replace(/\[SAVE_RESULT:[\s\S]*$/, '').replace(/\[SAVE:[\s\S]*$/, '').trim();
+        const title = activeSave[1].trim();
+        const format = activeSave[2].trim();
         try {
             const saveResult = await API.saveAgentResult(state.currentCase, title, format, contentBefore);
             if (saveResult.ok) showToast(`已保存：${saveResult.filename}`);
@@ -2909,7 +2911,7 @@ async function handleChatMarkers(fullAnswer, originalQuestion) {
 
     const updateMatch = fullAnswer.match(/\[UPDATE:\s*(.+?)(?:,\s*key=(.+))?\]/);
     if (updateMatch) {
-        const contentBefore = fullAnswer.replace(/\[UPDATE:[\s\S]*$/, '').replace(/\[SAVE:[\s\S]*$/, '').trim();
+        const contentBefore = fullAnswer.replace(/\[UPDATE:[\s\S]*$/, '').replace(/\[SAVE_RESULT:[\s\S]*$/, '').replace(/\[SAVE:[\s\S]*$/, '').trim();
         const field = updateMatch[1].trim();
         const key = (updateMatch[2] || '').trim();
         try {
@@ -2945,7 +2947,7 @@ async function pollAndFollowUpChat(jobId, originalQuestion) {
                 if (!data.error) {
                     const content = data.message?.content || '';
                     // Strip markers from display
-                    const cleanContent = content.replace(/\[PARSE_EVIDENCE:[\s\S]*$/, '').replace(/\[SAVE:[\s\S]*$/, '').trim();
+                    const cleanContent = content.replace(/\[PARSE_EVIDENCE:[\s\S]*$/, '').replace(/\[(SAVE_RESULT|SAVE|BRIEF):[\s\S]*$/, '').trim();
                     await loadChatHistory();
                     renderCompanionMessages();
                     renderChatMessages();

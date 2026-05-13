@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import shutil
@@ -487,14 +488,17 @@ class AutoMaterialPipeline:
         return {"output_pdf": str(output_pdf), "original_pages": doc.page_count if hasattr(doc, 'page_count') else None}
 
     def copy_or_reference_input_pdf(self, raw_pdf, upload_dir):
-        raw_pdf = Path(raw_pdf)
+        raw_pdf = Path(raw_pdf).resolve()
         upload_dir = Path(upload_dir)
         upload_dir.mkdir(parents=True, exist_ok=True)
-        target = upload_dir / raw_pdf.name
-        if raw_pdf.resolve() == target.resolve():
-            return target
-        shutil.copy2(raw_pdf, target)
-        return target
+        # 共享缓存：同一份源PDF只保留一份副本，避免每次建库重复复制
+        cache_dir = upload_dir.parent / "_input_pdfs"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_key = hashlib.md5(str(raw_pdf).encode()).hexdigest()[:12]
+        cached = cache_dir / f"{cache_key}_{raw_pdf.name}"
+        if not cached.exists():
+            shutil.copy2(raw_pdf, cached)
+        return cached
 
     def run_directory_mineru(self, raw_pdf, directory_dir):
         directory_dir = Path(directory_dir)

@@ -2832,7 +2832,7 @@ def api_chat():
         "例如：[MEMORY: 扣押物品明细通常在价格认定书附表中而非搜查笔录正文]\n"
         "系统会自动保存这些经验，供后续案件复用。\n\n"
         "输出标记规则（所有标记放在回答最后一行，标记之前为正文）：\n"
-        "1. 如果用户要求保存结果，加一行 [SAVE: title=文件名, format=csv|md|txt]\n"
+        "1. 如果用户要求保存结果，加一行 [SAVE_RESULT: title=文件名, format=csv|md|txt]\n"
         "2. 如果用户要求更新某人的笔录摘要，按原有格式重新生成摘要正文，末尾加一行 [UPDATE: 笔录摘要, key=人物姓名]\n"
         "3. 如果用户要求更新某人的图片人物摘要，重新生成摘要正文，末尾加一行 [UPDATE: 人物摘要, key=人物姓名]\n"
         "4. 如果用户要求更新案情图谱，输出新的图谱JSON，末尾加一行 [UPDATE: 案情图谱]"
@@ -2981,19 +2981,21 @@ def api_chat_stream():
             "你启动时只有案件基本信息和证据目录。要用以下工具获取具体证据：\n"
             "- [SEARCH: 关键词] → 在案卷中搜索相关证据片段（GraphRAG检索）\n"
             "- [FETCH_RECORD: 笔录ID] → 获取某份笔录的完整全文\n"
-            "- [PARSE_EVIDENCE: 条目索引] → 解析证据卷中的非笔录材料（鉴定意见、勘验笔录等）\n\n"
+            "- [PARSE_EVIDENCE: 条目索引] → 解析证据卷中的非笔录材料（鉴定意见、勘验笔录等）\n"
+            "- [BRIEF: 分析任务描述] → 生成结构化分析简报（含笔录列表、人物摘要、图谱等上下文）\n"
+            "- [SAVE_RESULT: title=标题, format=md|csv|txt] → 将当前回答中的分析内容保存为文件\n"
+            "- [REBUILD_INDEX: 理由] → 请求重建GraphRAG索引（需用户确认后才执行）\n\n"
             "工作流程：用户提问 → 你想清楚需要查什么 → 发一个工具指令 → 系统执行并把结果追加给你 → "
             "你可以继续发指令 → 证据足够后给出最终答案。\n"
             "每次只能发一个指令。不要一次性列多个指令。不要问用户\"要不要继续查\"——自己决定，自己查。\n"
-            "最多使用 5 次工具。当你认为证据已足够，直接给出最终答案，不要带任何工具标记。\n"
-            "- [REBUILD_INDEX: 理由] → 请求重建GraphRAG索引（需用户确认后才执行）\n\n"
+            "最多使用 5 次工具。当你认为证据已足够，直接给出最终答案，不要带任何工具标记。\n\n"
             f"{memory_text}"
             "如果在办案过程中发现通用规律（非本案特定信息），可在回答末尾加一行：\n"
             "[MEMORY: 规律描述]\n"
             "例如：[MEMORY: 扣押物品明细通常在价格认定书附表中而非搜查笔录正文]\n"
             "系统会自动保存这些经验，供后续案件复用。\n\n"
             "输出标记规则（所有标记放在回答最后一行，标记之前为正文）：\n"
-            "1. 如果用户要求保存结果，加一行 [SAVE: title=文件名, format=csv|md|txt]\n"
+            "1. 如果用户要求保存结果，加一行 [SAVE_RESULT: title=文件名, format=csv|md|txt]\n"
             "2. 如果用户要求更新某人的笔录摘要，按原有格式重新生成摘要正文，末尾加一行 [UPDATE: 笔录摘要, key=人物姓名]\n"
             "3. 如果用户要求更新某人的图片人物摘要，重新生成摘要正文，末尾加一行 [UPDATE: 人物摘要, key=人物姓名]\n"
             "4. 如果用户要求更新案情图谱，输出新的图谱JSON，末尾加一行 [UPDATE: 案情图谱]"
@@ -3043,6 +3045,8 @@ def api_chat_stream():
             search_match = re.search(r"\[SEARCH:\s*([^\]]+)\]", round_answer)
             fetch_match = re.search(r"\[FETCH_RECORD:\s*(\d+)\]", round_answer)
             parse_match = re.search(r"\[PARSE_EVIDENCE:\s*([^\]]+)\]", round_answer)
+            brief_match = re.search(r"\[BRIEF:\s*([^\]]+)\]", round_answer)
+            save_match = re.search(r"\[SAVE_RESULT:\s*title=(.+),\s*format=(md|csv|txt)\]", round_answer)
             rebuild_match = re.search(r"\[REBUILD_INDEX:\s*([^\]]*)\]", round_answer)
 
             if search_match:
@@ -3090,6 +3094,40 @@ def api_chat_stream():
                 messages.append({"role": "assistant", "content": partial or f"正在提交 {len(entries)} 份证据解析…"})
                 yield _sse_event("stage", {"stage": "thinking", "text": f"提交证据解析：{len(entries)} 份…"})
                 messages.append({"role": "user", "content": f"[系统] 已记录 {len(entries)} 份证据解析请求，解析完成后可继续提问。"})
+                continue
+
+            if brief_match:
+                task = brief_match.group(1).strip()
+                partial = round_answer[:brief_match.start()].strip()
+                messages.append({"role": "assistant", "content": partial or f"正在生成简报：{task[:30]}…"})
+                yield _sse_event("stage", {"stage": "thinking", "text": f"分析简报：{task[:20]}…"})
+                retrieval = retrieve_graphrag(case_id, data, BASE_DIR, task, limit=10)
+                brief = _build_agent_brief(case_id, data, task, "markdown", retrieval)
+                messages.append({"role": "user", "content": f"[分析简报]\n{brief}"})
+                continue
+
+            if save_match:
+                title = save_match.group(1).strip()
+                fmt = save_match.group(2).strip()
+                content_to_save = round_answer[:save_match.start()].strip()
+                if not content_to_save:
+                    messages.append({"role": "assistant", "content": f"[系统] SAVE_RESULT 需要标记前有正文内容，请先生成分析再保存"})
+                    continue
+                partial = content_to_save
+                messages.append({"role": "assistant", "content": partial})
+                yield _sse_event("stage", {"stage": "thinking", "text": f"保存文件：{title}"})
+                suffix = {"markdown": "md", "md": "md", "csv": "csv", "txt": "txt"}.get(fmt, "md")
+                output_dir = _agent_output_dir(case_id)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                filename = f"{_safe_filename(title)}.{suffix}"
+                output_path = output_dir / filename
+                counter = 2
+                while output_path.exists():
+                    output_path = output_dir / f"{_safe_filename(title)}_{counter}.{suffix}"
+                    counter += 1
+                encoding = "utf-8-sig" if suffix == "csv" else "utf-8"
+                output_path.write_text(str(content_to_save), encoding=encoding)
+                messages.append({"role": "user", "content": f"[系统] 已保存到：{output_path.name}"})
                 continue
 
             if rebuild_match:
