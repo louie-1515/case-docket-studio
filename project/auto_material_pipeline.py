@@ -500,9 +500,73 @@ class AutoMaterialPipeline:
             shutil.copy2(raw_pdf, cached)
         return cached
 
+    # MinerU API 硬限制：200MB + 200 页
+    MINERU_MAX_FILE_SIZE = 190 * 1024 * 1024
+    MINERU_MAX_PAGES = 200
+
+    def _truncate_pdf_for_directory(self, raw_pdf, job_dir):
+        """超大 PDF 截取前部用于目录解析，确保不超过 MinerU 200MB 限制。
+
+        策略：按比例估算安全页数，截取后验证大小，超标则二分收敛。
+        目录集中在卷首，截取部分足够覆盖任何大型案件的目录。
+        """
+        pymupdf = import_pymupdf()
+        raw_pdf = Path(raw_pdf)
+        file_size = raw_pdf.stat().st_size
+        # 即便单页也超限，至少保留 10 页（实际上不存在这种 PDF）
+        best = 10
+        doc = pymupdf.open(str(raw_pdf))
+        try:
+            total_pages = doc.page_count
+            safe_pages = max(50, int(total_pages * self.MINERU_MAX_FILE_SIZE / file_size * 0.85))
+            safe_pages = min(safe_pages, total_pages, self.MINERU_MAX_PAGES)
+
+            truncated_pdf = Path(job_dir) / "_truncated_directory.pdf"
+
+            def _save_pages(page_count):
+                out = pymupdf.open()
+                try:
+                    out.insert_pdf(doc, from_page=0, to_page=page_count - 1)
+                    out.save(str(truncated_pdf))
+                finally:
+                    out.close()
+
+            _save_pages(safe_pages)
+            if truncated_pdf.stat().st_size > self.MINERU_MAX_FILE_SIZE:
+                lo, hi = 1, safe_pages
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    probe = pymupdf.open()
+                    tmp = None
+                    try:
+                        probe.insert_pdf(doc, from_page=0, to_page=mid - 1)
+                        tmp = truncated_pdf.with_name(f"_probe_{mid}.pdf")
+                        probe.save(str(tmp))
+                        probe.close()
+                        if tmp.stat().st_size <= self.MINERU_MAX_FILE_SIZE:
+                            lo = mid + 1
+                            best = mid
+                        else:
+                            hi = mid
+                    finally:
+                        try:
+                            probe.close()
+                        except Exception:
+                            pass
+                        if tmp and tmp.exists():
+                            tmp.unlink()
+                safe_pages = best
+                _save_pages(safe_pages)
+            return truncated_pdf
+        finally:
+            doc.close()
+
     def run_directory_mineru(self, raw_pdf, directory_dir):
         directory_dir = Path(directory_dir)
         directory_dir.mkdir(parents=True, exist_ok=True)
+        raw_pdf_path = Path(raw_pdf)
+        if raw_pdf_path.stat().st_size > self.MINERU_MAX_FILE_SIZE:
+            raw_pdf = self._truncate_pdf_for_directory(raw_pdf_path, directory_dir.parent)
         return self.mineru_client.parse_pdf_to_clean_dir(raw_pdf, directory_dir, job_label="directory_mineru")
 
     def run_document_mineru(self, document_pdf, document_dir, document_type=""):
@@ -825,23 +889,63 @@ class AutoMaterialPipeline:
         record_mineru_dir = Path(record_mineru_dir)
         record_mineru_dir.mkdir(parents=True, exist_ok=True)
         results = []
-        for item in split_results:
-            split_pdf = Path(item["split_pdf"])
-            clean_dir = record_mineru_dir / split_pdf.stem
-            clean_dir.mkdir(parents=True, exist_ok=True)
-            self.mineru_client.parse_pdf_to_clean_dir(split_pdf, clean_dir, job_label=split_pdf.stem)
-            result = dict(item)
-            result.update(
-                {
+        if not split_results:
+            return results
+
+        batch_size = self.mineru_client.BATCH_MAX_FILES
+        for batch_start in range(0, len(split_results), batch_size):
+            batch = split_results[batch_start:batch_start + batch_size]
+            batch_pdfs = []
+            batch_dirs = []
+            batch_items = []
+            for item in batch:
+                split_pdf = Path(item["split_pdf"])
+                clean_dir = record_mineru_dir / split_pdf.stem
+                clean_dir.mkdir(parents=True, exist_ok=True)
+                batch_pdfs.append(split_pdf)
+                batch_dirs.append(clean_dir)
+                batch_items.append(dict(item))
+
+            try:
+                batch_results = self.mineru_client.parse_pdfs_batch(
+                    batch_pdfs, batch_dirs,
+                    job_label=f"batch_{batch_start // batch_size + 1}",
+                )
+            except Exception as exc:
+                # 整批致命失败（提交/轮询阶段）
+                batch_results = [("failed", str(exc))] * len(batch)
+
+            for item, clean_dir, (status, error) in zip(batch_items, batch_dirs, batch_results):
+                result = {
+                    **item,
                     "clean_dir": str(clean_dir),
                     "clean_full_md": str(clean_dir / "full.md"),
                     "clean_content_list": str(clean_dir / "content_list_v2.json"),
                     "clean_layout": str(clean_dir / "layout.json"),
                     "clean_meta": str(clean_dir / "mineru_meta.json"),
-                    "status": "completed",
+                    "status": status,
                 }
-            )
-            results.append(result)
+                if error:
+                    result["error"] = error
+                results.append(result)
+
+        # 重试单个失败项（批量中部分下载/解压失败的，单独走单文件接口）
+        failed = [r for r in results if r.get("status") == "failed"]
+        if failed:
+            for r in failed:
+                try:
+                    split_pdf = Path(r["split_pdf"])
+                    clean_dir = Path(r["clean_dir"])
+                    self.mineru_client.parse_pdf_to_clean_dir(
+                        split_pdf, clean_dir,
+                        job_label=split_pdf.stem,
+                    )
+                    r["status"] = "completed"
+                    r.pop("error", None)
+                except Exception as exc:
+                    r["error"] = f"{r.get('error', '')}; 重试: {exc}".strip("; ")
+
+        results.sort(key=lambda r: r.get("index", 0))
         return results
 
     def _load_directory_full_text(self, directory_dir):
@@ -1091,10 +1195,11 @@ class AutoMaterialPipeline:
             manifest["stage"] = "split_pdfs"
             self.write_manifest(manifest)
 
-            record_results = self.run_record_mineru(split_results, stage_dirs["record_mineru"])
             manifest["outputs"]["record_mineru_dir"] = str(stage_dirs["record_mineru"])
             manifest["stage"] = "record_mineru"
+            manifest["record_total"] = len(split_results)
             self.write_manifest(manifest)
+            record_results = self.run_record_mineru(split_results, stage_dirs["record_mineru"])
 
             validations = []
             review_items = []
@@ -1224,6 +1329,7 @@ class AutoMaterialPipeline:
             case_data = {
                 "案件名称": case_name,
                 "案件编号": case_no,
+                "_raw_pdf": str(Path(uploaded_pdf).resolve().relative_to(self.base_dir.resolve())),
                 "笔录目录": [
                     {
                         "id": record_item["id"],

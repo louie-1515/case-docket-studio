@@ -245,19 +245,68 @@ class MinerUClient:
         )
         return output_dir
 
+    def _download_result_bytes(self, result_url):
+        """下载 MinerU 解析结果为 bytes，不落盘（避免 AV 文件锁）。"""
+        if not result_url:
+            raise MinerUError("result_url 为空")
+        headers = self._headers()
+        body = self.http_request("GET", result_url, headers=headers, data=None, timeout=60)
+        if not isinstance(body, (bytes, bytearray)):
+            raise MinerUError("下载结果不是二进制内容")
+        return bytes(body)
+
+    def _extract_clean_from_bytes(self, zip_bytes, output_dir, keep_debug=False):
+        """从内存中的 zip bytes 直接解压，不经过磁盘文件。"""
+        import io
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        essential_suffixes = ("full.md",)
+        optional_suffixes = ("full.md", "content_list_v2.json", "layout.json")
+        meta = {
+            "extracted_at": _now_iso(),
+            "keep_debug": bool(keep_debug),
+        }
+        written = set()
+        with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+            for name in zf.namelist():
+                norm = name.replace("\\", "/").lstrip("/")
+                if not norm or norm.endswith("/"):
+                    continue
+                if any(norm.endswith(suffix) for suffix in optional_suffixes):
+                    clean_name = norm.split("_")[-1] if "_" in norm else norm
+                    if not any(clean_name.endswith(s) for s in optional_suffixes):
+                        clean_name = norm.split("/")[-1]
+                    target = output_dir / clean_name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name, "r") as src, open(target, "wb") as dst:
+                        dst.write(src.read())
+                    written.add(clean_name)
+                    continue
+                if keep_debug:
+                    parts = Path(norm).parts
+                    if any(part in ("..", "") for part in parts):
+                        continue
+                    target = output_dir / norm
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name, "r") as src, open(target, "wb") as dst:
+                        dst.write(src.read())
+        has_essential = any(w.endswith(s) for w in written for s in essential_suffixes)
+        if not has_essential:
+            raise MinerUError(f"MinerU zip 缺少关键文件 full.md（已提取: {sorted(written)}）")
+        (output_dir / "mineru_meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return output_dir
+
     def parse_pdf_to_clean_dir(self, pdf_path, output_dir, job_label=""):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         batch_id = self.submit_pdf(pdf_path, job_label=job_label)
         status = self.wait_for_result(batch_id)
         result_url = status.get("result_url")
-        zip_path = output_dir / f"{batch_id}.zip"
-        self.download_result_zip(result_url, zip_path)
-        self.extract_clean_result(zip_path, output_dir, keep_debug=False)
-        try:
-            zip_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        zip_bytes = self._download_result_bytes(result_url)
+        self._extract_clean_from_bytes(zip_bytes, output_dir, keep_debug=False)
         return output_dir
 
     def _require_success_data(self, resp):
@@ -279,6 +328,173 @@ class MinerUClient:
         if not isinstance(result, dict):
             raise MinerUError("MinerU 返回缺少 extract_result")
         return result
+
+    # 批量提交上限（MinerU API 限制单次 ≤50 个文件）
+    BATCH_MAX_FILES = 50
+
+    def submit_files_batch(self, pdf_paths, job_label=""):
+        """一次提交多个 PDF，返回 batch_id。内部并发上传所有文件。"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if not pdf_paths:
+            raise MinerUError("pdf_paths 为空")
+        if len(pdf_paths) > self.BATCH_MAX_FILES:
+            raise MinerUError(f"单次提交不能超过 {self.BATCH_MAX_FILES} 个文件，当前 {len(pdf_paths)}")
+
+        url = f"{self._base_url()}/api/v4/file-urls/batch"
+        files = []
+        path_map = {}  # data_id → pdf_path
+        for pdf_path in pdf_paths:
+            p = Path(pdf_path)
+            if not p.exists() or not p.is_file():
+                raise MinerUError(f"PDF 不存在: {p}")
+            data_id = self._data_id(f"{job_label}_{p.stem}" if job_label else p.stem)
+            path_map[data_id] = p
+            file_item = {
+                "name": p.name,
+                "data_id": data_id,
+                "is_ocr": bool(self.config.get("is_ocr", True)),
+            }
+            page_ranges = (self.config.get("page_ranges") or "").strip()
+            if page_ranges:
+                file_item["page_ranges"] = page_ranges
+            files.append(file_item)
+
+        payload = {
+            "files": files,
+            "model_version": self.config.get("model_version") or "vlm",
+            "enable_formula": bool(self.config.get("enable_formula", False)),
+            "enable_table": bool(self.config.get("enable_table", True)),
+            "language": self.config.get("language") or "ch",
+        }
+        headers = {"Content-Type": "application/json", **self._headers()}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        resp = self.http_request("POST", url, headers=headers, data=data, timeout=60)
+        data = self._require_success_data(resp)
+        batch_id = data.get("batch_id")
+        file_urls = data.get("file_urls") or []
+        if not batch_id or not file_urls:
+            raise MinerUError("MinerU 返回缺少 batch_id 或 file_urls")
+        if len(file_urls) != len(files):
+            raise MinerUError(f"file_urls 数量不匹配: 期望 {len(files)}，实际 {len(file_urls)}")
+
+        # 并发上传所有文件
+        data_ids = [f["data_id"] for f in files]
+        n_files = len(file_urls)
+        upload_workers = min(n_files, 20)
+        upload_errors = []
+
+        def _upload_one(idx):
+            try:
+                pdf = path_map[data_ids[idx]]
+                u = file_urls[idx]
+                body = pdf.read_bytes()
+                self.http_request("PUT", u, headers={}, data=body, timeout=120)
+            except Exception as exc:
+                upload_errors.append((idx, str(exc)))
+
+        with ThreadPoolExecutor(max_workers=upload_workers) as ex:
+            futures = [ex.submit(_upload_one, i) for i in range(n_files)]
+            for f in futures:
+                f.result()
+
+        if upload_errors:
+            first = upload_errors[0]
+            raise MinerUError(
+                f"批量上传失败 ({len(upload_errors)}/{n_files}): "
+                f"文件 {first[0]+1}: {first[1][:120]}"
+            )
+
+        return batch_id
+
+    def wait_for_batch(self, batch_id, expected_count):
+        """等待批量任务完成，返回 extract_result 列表。
+
+        单个文件解析失败不阻塞整批，失败的项 state 为 "failed"。
+        """
+        if not batch_id:
+            raise MinerUError("batch_id 为空")
+        poll = int(self.config.get("poll_interval_seconds", 3) or 3)
+        timeout = int(self.config.get("timeout_seconds", 3600) or 3600)
+        url = f"{self._base_url()}/api/v4/extract-results/batch/{batch_id}"
+        headers = self._headers()
+
+        started = time.time()
+        while True:
+            resp = self.http_request("GET", url, headers=headers, data=None, timeout=60)
+            data = self._require_success_data(resp)
+            results = data.get("extract_result")
+            if not isinstance(results, list) or not results:
+                raise MinerUError("MinerU 返回缺少 extract_result")
+            if len(results) != expected_count:
+                raise MinerUError(
+                    f"extract_result 数量不匹配: 期望 {expected_count}，实际 {len(results)}"
+                )
+
+            states = [
+                (r.get("state") or r.get("status") or "").lower()
+                for r in results
+            ]
+            # 每个文件到达终态（done/failed/error）即视为完成
+            terminal = {"done", "finished", "success", "failed", "error"}
+            if all(s in terminal for s in states):
+                for r in results:
+                    if not r.get("result_url"):
+                        r["result_url"] = r.get("full_zip_url")
+                return results
+            if time.time() - started >= timeout:
+                raise MinerUError("等待 MinerU 批量结果超时")
+            self.sleep(poll)
+
+    def parse_pdfs_batch(self, pdf_paths, output_dirs, job_label=""):
+        """批量解析 PDF：一次提交，并发上传，统一轮询，分别下载解压。
+
+        返回 [(status, error_msg), ...] 每项 status 为 "completed" 或 "failed"。
+        单个下载失败不影响其他文件。
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        pdf_paths = [Path(p) for p in pdf_paths]
+        output_dirs = [Path(d) for d in output_dirs]
+        if len(pdf_paths) != len(output_dirs):
+            raise MinerUError("pdf_paths 与 output_dirs 数量不一致")
+        for d in output_dirs:
+            d.mkdir(parents=True, exist_ok=True)
+
+        batch_id = self.submit_files_batch(pdf_paths, job_label=job_label)
+        extract_results = self.wait_for_batch(batch_id, len(pdf_paths))
+
+        n = len(extract_results)
+        batch_results = [("failed", "未处理") for _ in range(n)]
+
+        def _download_one(idx):
+            try:
+                r = extract_results[idx]
+                state = (r.get("state") or r.get("status") or "").lower()
+                if state in ("failed", "error"):
+                    err = r.get("err_msg") or r.get("message") or "MinerU 解析失败"
+                    batch_results[idx] = ("failed", err)
+                    return
+                result_url = r.get("result_url") or r.get("full_zip_url")
+                if not result_url:
+                    batch_results[idx] = ("failed", "缺少 result_url")
+                    return
+                zip_bytes = self._download_result_bytes(result_url)
+                self._extract_clean_from_bytes(zip_bytes, output_dirs[idx])
+                batch_results[idx] = ("completed", None)
+            except Exception as exc:
+                batch_results[idx] = ("failed", str(exc))
+
+        dl_workers = min(n, 10)
+        with ThreadPoolExecutor(max_workers=dl_workers) as ex:
+            futures = [ex.submit(_download_one, i) for i in range(n)]
+            for f in futures:
+                try:
+                    f.result()
+                except Exception:
+                    pass  # 已在 _download_one 内部捕获
+
+        return batch_results
 
     def _data_id(self, label):
         value = "".join(ch if ch.isalnum() or ch in "_-." else "_" for ch in str(label or "pdf"))

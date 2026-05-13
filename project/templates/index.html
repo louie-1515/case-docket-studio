@@ -54,7 +54,10 @@
                     <h2>废纸篓</h2>
                     <p>删除的案件保留 7 天，过期自动彻底删除。</p>
                 </div>
-                <button id="btn-back-from-trash" class="btn btn-small" type="button">← 返回案件列表</button>
+                <div style="display:flex; gap:8px;">
+                    <button id="btn-empty-trash" class="btn btn-small btn-danger" type="button">清空废纸篓</button>
+                    <button id="btn-back-from-trash" class="btn btn-small" type="button">← 返回案件列表</button>
+                </div>
             </div>
             <div id="entry-trash-list" class="entry-case-list"></div>
         </section>
@@ -637,7 +640,17 @@
         </div>
     </div>
 
+    <div id="confirm-modal" class="confirm-overlay hidden">
+        <div class="confirm-box">
+            <p id="confirm-message"></p>
+            <div class="confirm-buttons">
+                <button id="confirm-cancel" class="btn" type="button">取消</button>
+                <button id="confirm-ok" class="btn confirm-ok-btn" type="button">确认</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/chat-thinking.js?v=3"></script>
-    <script src="/static/app.js?v=3"></script>
+    <script src="/static/app.js?v=9"></script>
 </body>
 </html>

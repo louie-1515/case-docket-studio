@@ -295,6 +295,14 @@ const API = {
         const res = await fetch('/api/trash');
         return res.json();
     },
+    async emptyTrash() {
+        const res = await fetch('/api/trash/empty', { method: 'POST' });
+        return res.json();
+    },
+    async permanentDeleteTrash(caseId) {
+        const res = await fetch(`/api/trash/${encodeURIComponent(caseId)}`, { method: 'DELETE' });
+        return res.json();
+    },
     async updateCaseField(caseId, field, key, content) {
         const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/update-field`, {
             method: 'POST',
@@ -348,6 +356,7 @@ const dom = {
     entryTrashList: document.getElementById('entry-trash-list'),
     btnOpenTrash: document.getElementById('btn-open-trash'),
     btnBackFromTrash: document.getElementById('btn-back-from-trash'),
+    btnEmptyTrash: document.getElementById('btn-empty-trash'),
     newCaseName: document.getElementById('new-case-name'),
     newCaseUseExistingConfig: document.getElementById('new-case-use-existing-config'),
     newCaseConfigFields: document.getElementById('new-case-config-fields'),
@@ -481,17 +490,61 @@ async function init() {
     await refreshCaseOptions();
     await loadAISettings();
     bindEvents();
+
+    // 刷新后恢复建库进度条（优先 sessionStorage，其次扫描 running job）
+    let resumeCaseId, resumeJobId;
+    try { resumeCaseId = sessionStorage.getItem('buildProgressCaseId'); } catch (_) {}
+    try { resumeJobId = sessionStorage.getItem('buildProgressJobId'); } catch (_) {}
+    if (!resumeJobId) {
+        // sessionStorage 没记录时，从 API 查运行中的 material_auto_build 任务
+        try {
+            const resp = await fetch('/api/jobs');
+            const data = await resp.json();
+            const jobs = data.jobs || [];
+            const running = jobs.find(j => j.type === 'material_auto_build' && j.status === 'running');
+            if (running) {
+                resumeCaseId = running.case;
+                resumeJobId = running.id;
+                try { sessionStorage.setItem('buildProgressCaseId', resumeCaseId); } catch (_) {}
+                try { sessionStorage.setItem('buildProgressJobId', resumeJobId); } catch (_) {}
+            }
+        } catch (_) {}
+    }
+    if (resumeCaseId && resumeJobId) {
+        try {
+            // 先确认 job 在 store 中存在且状态匹配，再读 manifest
+            const jobData = await API.getJob(resumeCaseId, resumeJobId);
+            const job = jobData.job || jobData;
+            if (job && (job.status === 'running' || job.status === 'completed')) {
+                showEntryCover('new');
+                showBuildProgress(resumeCaseId, resumeJobId);
+                return;
+            }
+        } catch (_) {}
+        try { sessionStorage.removeItem('buildProgressCaseId'); } catch (_) {}
+        try { sessionStorage.removeItem('buildProgressJobId'); } catch (_) {}
+    }
+
     showEntryCover();
 }
 
 async function refreshCaseOptions() {
     const cases = await API.getCases();
     state.cases = cases || [];
-    dom.caseSelect.innerHTML = state.cases.map(c =>
-        `<option value="${escapeAttr(c.id)}">${escapeHtml(c.name)} (${Number(c.record_count || 0)}份)</option>`
-    ).join('');
+    refreshCaseSelector();
     renderEntryCaseList();
     return state.cases;
+}
+
+function refreshCaseSelector() {
+    if (!dom.caseSelect) return;
+    dom.caseSelect.innerHTML = (state.cases || []).map(c =>
+        `<option value="${escapeAttr(c.id)}">${escapeHtml(c.name)} (${Number(c.record_count || 0)}份)</option>`
+    ).join('');
+    // 保持当前选中项
+    if (state.currentCase) {
+        dom.caseSelect.value = state.currentCase;
+    }
 }
 
 function showEntryCover(mode = '') {
@@ -547,6 +600,7 @@ async function deleteCase(caseId) {
         if (data.error) { showToast(data.error); return; }
         showToast(`"${name}" 已移入废纸篓`);
         state.cases = await API.getCases();
+        refreshCaseSelector();
         renderEntryCaseList();
     } catch (e) {
         showToast('删除失败');
@@ -573,6 +627,7 @@ function renderTrashList() {
                 <small>${escapeHtml(item.deleted_at)} · ${item.days_left} 天后彻底删除</small>
             </div>
             <button class="entry-case-restore" type="button" data-restore-case="${escapeAttr(item.case_id)}" title="恢复">↩</button>
+            <button class="entry-case-delete-permanent" type="button" data-delete-permanent="${escapeAttr(item.case_id)}" title="彻底删除">✕</button>
         </div>
     `).join('');
 
@@ -580,6 +635,12 @@ function renderTrashList() {
         btn.addEventListener('click', e => {
             e.stopPropagation();
             restoreCase(btn.dataset.restoreCase);
+        });
+    });
+    dom.entryTrashList.querySelectorAll('.entry-case-delete-permanent').forEach(btn => {
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            permanentDeleteFromTrash(btn.dataset.deletePermanent);
         });
     });
 }
@@ -590,11 +651,71 @@ async function restoreCase(caseId) {
         if (data.error) { showToast(data.error); return; }
         showToast('案件已恢复');
         state.cases = await API.getCases();
+        refreshCaseSelector();
         state.trash = (await API.getTrash()).trash || [];
         renderEntryCaseList();
         renderTrashList();
     } catch (e) {
         showToast('恢复失败');
+    }
+}
+
+function showConfirm(message) {
+    return new Promise(resolve => {
+        const overlay = document.getElementById('confirm-modal');
+        const msgEl = document.getElementById('confirm-message');
+        const btnCancel = document.getElementById('confirm-cancel');
+        const btnOk = document.getElementById('confirm-ok');
+        if (!overlay || !msgEl) { resolve(confirm(message)); return; }
+
+        msgEl.textContent = message;
+        overlay.classList.remove('hidden');
+
+        function cleanup(result) {
+            overlay.classList.add('hidden');
+            btnCancel.removeEventListener('click', onCancel);
+            btnOk.removeEventListener('click', onOk);
+            document.removeEventListener('keydown', onKey);
+            resolve(result);
+        }
+        function onCancel() { cleanup(false); }
+        function onOk() { cleanup(true); }
+        function onKey(e) {
+            if (e.key === 'Escape') cleanup(false);
+            if (e.key === 'Enter') cleanup(true);
+        }
+
+        btnCancel.addEventListener('click', onCancel);
+        btnOk.addEventListener('click', onOk);
+        document.addEventListener('keydown', onKey);
+        btnCancel.focus();
+    });
+}
+
+async function permanentDeleteFromTrash(caseId) {
+    if (!(await showConfirm('确定要彻底删除此案件？此操作不可恢复。'))) return;
+    try {
+        const data = await API.permanentDeleteTrash(caseId);
+        if (data.error) { showToast(data.error); return; }
+        showToast('已彻底删除');
+        state.trash = state.trash.filter(item => item.case_id !== caseId);
+        renderTrashList();
+    } catch (e) {
+        showToast('彻底删除失败');
+    }
+}
+
+async function emptyTrash() {
+    if (!state.trash || !state.trash.length) { showToast('废纸篓已为空'); return; }
+    if (!(await showConfirm(`确定清空废纸篓（共 ${state.trash.length} 个案件）？此操作不可恢复。`))) return;
+    try {
+        const data = await API.emptyTrash();
+        if (data.error) { showToast(data.error); return; }
+        showToast(`已清空 ${data.deleted} 个案件`);
+        state.trash = [];
+        renderTrashList();
+    } catch (e) {
+        showToast('清空失败');
     }
 }
 
@@ -1391,6 +1512,12 @@ async function pollEvidenceParseJob() {
             bar.textContent = `解析完成: ${job.message}`;
             evidenceState.parseJobId = null;
             await loadEvidenceView(); // Reload to show parsed tags
+            const rebuild = await showConfirm('证据解析已完成。是否重建 GraphRAG 索引？\n\n新解析的证据内容需要重建索引后才能被 GraphRAG 检索到。');
+            if (rebuild) {
+                bar.textContent = '正在重建 GraphRAG 索引...';
+                await rebuildGraphRAGIndex();
+                bar.textContent = '解析完成，GraphRAG 索引已重建';
+            }
         } else if (job.status === 'failed') {
             bar.textContent = `解析失败: ${job.message}`;
             evidenceState.parseJobId = null;
@@ -2986,6 +3113,7 @@ function bindEvents() {
     dom.btnEntryOldCase.addEventListener('click', showOldCaseChooser);
     if (dom.btnOpenTrash) dom.btnOpenTrash.addEventListener('click', openTrash);
     if (dom.btnBackFromTrash) dom.btnBackFromTrash.addEventListener('click', showOldCaseChooser);
+    if (dom.btnEmptyTrash) dom.btnEmptyTrash.addEventListener('click', emptyTrash);
     dom.btnOpenNewCase.addEventListener('click', showNewCaseWizard);
     dom.newCaseUseExistingConfig.addEventListener('change', toggleNewCaseConfigFields);
     dom.btnPickNewCasePdf.addEventListener('click', () => pickPath(dom.newCaseRawPdf, 'file', 'pdf'));
@@ -3273,17 +3401,28 @@ async function showBuildProgress(caseId, jobId) {
     dom.entryClientSelect.classList.add('hidden');
     dom.entryAnalysisProgress.classList.add('hidden');
 
+    // 记入 sessionStorage，刷新页面后自动恢复进度条
+    try { sessionStorage.setItem('buildProgressCaseId', caseId); } catch (_) {}
+    try { sessionStorage.setItem('buildProgressJobId', jobId); } catch (_) {}
+
     if (!jobId) {
         dom.buildProgressStage.textContent = '等待任务创建...';
         return;
     }
+
+    const stageNames = {
+        upload: '正在上传文件', directory_mineru: '正在 MinerU 解析目录',
+        document_mineru: '正在 MinerU 解析文书材料', directory_parse: '正在解析目录结构',
+        split_pdfs: '正在拆分笔录 PDF', record_mineru: '正在 MinerU OCR 识别笔录',
+        validation: '正在校验数据', case_json: '正在生成案件数据',
+        graphrag: '正在构建 GraphRAG 检索索引', completed: '建库完成',
+    };
 
     const poll = async () => {
         try {
             const data = await API.getJob(caseId, jobId);
             const job = data.job || data;
             const status = job.status || 'running';
-            const progress = job.progress || 0;
             const message = job.message || '';
             let manifestData = {};
             try {
@@ -3291,28 +3430,34 @@ async function showBuildProgress(caseId, jobId) {
                 manifestData = mf.manifest || {};
             } catch (_) {}
 
+            const stage = manifestData.stage || '';
+            // 优先用 manifest 计算的进度（按阶段+子进度），fallback 到 job.progress
+            const progress = (manifestData._progress != null) ? manifestData._progress : (job.progress || 0);
 
             if (dom.buildProgressFill) dom.buildProgressFill.style.width = progress + '%';
-            if (dom.buildProgressStage) dom.buildProgressStage.textContent = message || '处理中...';
 
-            const stage = manifestData.stage || '';
-            if (stage && dom.buildProgressDetail) {
-                const stageNames = {
-                    upload: '上传文件', directory_mineru: '解析目录', document_mineru: '解析文书材料',
-                    directory_parse: '解析目录结构', split_pdfs: '拆分笔录', record_mineru: 'OCR 识别笔录',
-                    validation: '校验数据', case_json: '生成案件数据', graphrag: '构建检索索引', completed: '建库完成',
-                };
-                dom.buildProgressDetail.textContent = stageNames[stage] || stage;
+            // 主状态文本：显示当前阶段中文名
+            const stageText = stageNames[stage] || (message || '处理中...');
+            if (dom.buildProgressStage) dom.buildProgressStage.textContent = stageText;
+
+            // 详情：显示阶段+大致进度
+            if (dom.buildProgressDetail && stage) {
+                dom.buildProgressDetail.textContent = `阶段 ${progress}%`;
             }
 
             if (status === 'completed') {
+                try { sessionStorage.removeItem('buildProgressCaseId'); } catch (_) {}
+                try { sessionStorage.removeItem('buildProgressJobId'); } catch (_) {}
                 if (dom.buildProgressStage) dom.buildProgressStage.textContent = '建库完成！';
                 if (dom.buildProgressDetail) dom.buildProgressDetail.textContent = '';
+                if (dom.buildProgressFill) dom.buildProgressFill.style.width = '100%';
                 const candidates = manifestData.party_candidates || [];
                 showClientSelection(caseId, candidates);
                 return;
             }
             if (status === 'failed') {
+                try { sessionStorage.removeItem('buildProgressCaseId'); } catch (_) {}
+                try { sessionStorage.removeItem('buildProgressJobId'); } catch (_) {}
                 if (dom.buildProgressStage) dom.buildProgressStage.textContent = '建库失败：' + message;
                 return;
             }

@@ -90,7 +90,7 @@ def _fix_request_encoding():
         if not body or not _query_string_contains_non_ascii(body):
             return
         # 关键难点：GBK 中文字节序列可能是合法的 UTF-8（只是解出错误字符）。
-        # 例如"张三" GBK=D6 EC CF BC CF BC，UTF-8 不会报错而是解出 Ƭϼϼ。
+        # 例如某中文姓名，GBK 字节序列可能被 UTF-8 误读为乱码而不报错。
         # 策略：对比 UTF-8 和 GBK 两种解码，GBK 产出中文且 UTF-8 没有中文 → 判定为 GBK。
         utf8_text = None
         try:
@@ -1004,7 +1004,7 @@ def save_case_data(case_id, case_data):
 
 
 def _clean_trash_expired():
-    """清理废纸篓中超过 7 天的案件。"""
+    """清理废纸篓中超过 7 天的案件（永久删除）。"""
     now = datetime.now(timezone.utc).astimezone()
     if not TRASH_DIR.exists():
         return
@@ -1057,6 +1057,37 @@ def move_case_to_trash(case_id):
         if agent_dir.exists():
             shutil.move(str(agent_dir), str(trash_case_dir / "agent_outputs"))
             moved.append("agent_outputs")
+    except Exception:
+        pass
+
+    # 材料建库产物（非关键，失败不影响）
+    material_jobs_dir = BASE_DIR / "runtime" / "material_jobs"
+    material_moved = 0
+    if material_jobs_dir.exists():
+        for job_dir in list(material_jobs_dir.iterdir()):
+            if not job_dir.is_dir():
+                continue
+            manifest_file = job_dir / "manifest.json"
+            if not manifest_file.exists():
+                continue
+            try:
+                manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                if manifest.get("case_id") == case_id:
+                    dest = trash_case_dir / "material_jobs" / job_dir.name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(job_dir), str(dest))
+                    material_moved += 1
+            except Exception:
+                pass
+    if material_moved:
+        moved.append(f"material_jobs_x{material_moved}")
+
+    # 清理 analysis_jobs.json 中该案件的任务记录
+    try:
+        jobs = AI_STORE.get_jobs()
+        kept = [j for j in jobs if j.get("case") != case_id]
+        if len(kept) < len(jobs):
+            AI_STORE.save_jobs(kept)
     except Exception:
         pass
 
@@ -1113,11 +1144,93 @@ def restore_case_from_trash(case_id):
             restored.append("agent_outputs")
     except Exception:
         pass
-        restored.append("agent_outputs")
 
-    # 清理废纸篓目录
+    # 恢复材料建库产物（非关键）
+    try:
+        material_src = trash_case_dir / "material_jobs"
+        if material_src.exists():
+            material_dst_base = BASE_DIR / "runtime" / "material_jobs"
+            material_dst_base.mkdir(parents=True, exist_ok=True)
+            m_count = 0
+            for job_dir in material_src.iterdir():
+                if not job_dir.is_dir():
+                    continue
+                target = material_dst_base / job_dir.name
+                if target.exists():
+                    shutil.rmtree(str(target), ignore_errors=True)
+                shutil.move(str(job_dir), str(target))
+                m_count += 1
+            if m_count:
+                restored.append(f"material_jobs_x{m_count}")
+                # 重建 analysis_jobs 记录（从 manifest 恢复）
+                try:
+                    jobs = AI_STORE.get_jobs()
+                    for job_dir in material_src.iterdir():
+                        if not job_dir.is_dir():
+                            continue
+                        mf = job_dir / "manifest.json"
+                        if not mf.exists():
+                            continue
+                        try:
+                            m = json.loads(mf.read_text(encoding="utf-8"))
+                            jid = m.get("job_id", "")
+                            if jid and not any(j.get("id") == jid for j in jobs):
+                                jobs.insert(0, {
+                                    "id": jid,
+                                    "case": case_id,
+                                    "type": "material_auto_build",
+                                    "title": "自动 MinerU 建库",
+                                    "profile": "cheap",
+                                    "status": m.get("status", "unknown"),
+                                    "progress": 100,
+                                    "message": m.get("message", ""),
+                                    "logs": [],
+                                    "params": m.get("inputs", {}),
+                                    "created_at": m.get("created_at", ""),
+                                    "updated_at": m.get("updated_at", ""),
+                                    "finished_at": m.get("updated_at", ""),
+                                    "manifest": str(mf),
+                                })
+                        except Exception:
+                            pass
+                    AI_STORE.save_jobs(jobs)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 清理废纸篓目录（已恢复，直接删除空壳）
     shutil.rmtree(str(trash_case_dir), ignore_errors=True)
     return True
+
+
+def permanent_delete_trash_case(case_id):
+    """彻底删除废纸篓中的指定案件。"""
+    trash_case_dir = TRASH_DIR / case_id
+    if not trash_case_dir.exists():
+        raise FileNotFoundError(f"废纸篓中未找到案件: {case_id}")
+    shutil.rmtree(str(trash_case_dir), ignore_errors=False)
+    # 也清理可能残留的 analysis_jobs 记录
+    try:
+        jobs = AI_STORE.get_jobs()
+        kept = [j for j in jobs if j.get("case") != case_id]
+        if len(kept) < len(jobs):
+            AI_STORE.save_jobs(kept)
+    except Exception:
+        pass
+
+
+def empty_all_trash():
+    """清空废纸篓中所有案件。"""
+    _clean_trash_expired()
+    if not TRASH_DIR.exists():
+        return 0
+    count = 0
+    for case_dir in list(TRASH_DIR.iterdir()):
+        if case_dir.is_dir():
+            shutil.rmtree(str(case_dir), ignore_errors=True)
+            count += 1
+    return count
 
 
 def list_trash():
@@ -1251,6 +1364,26 @@ def api_cases_restore(case_id):
 @app.route("/api/trash")
 def api_trash():
     return jsonify({"trash": list_trash()})
+
+
+@app.route("/api/trash/empty", methods=["POST"])
+def api_trash_empty():
+    try:
+        count = empty_all_trash()
+        return jsonify({"ok": True, "deleted": count})
+    except Exception as e:
+        return jsonify({"error": f"清空失败: {e}"}), 500
+
+
+@app.route("/api/trash/<case_id>", methods=["DELETE"])
+def api_trash_delete(case_id):
+    try:
+        permanent_delete_trash_case(case_id)
+        return jsonify({"ok": True, "case_id": case_id})
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": f"彻底删除失败: {e}"}), 500
 
 
 @app.route("/api/workspace/open", methods=["POST"])
@@ -2190,6 +2323,38 @@ def api_job_manifest(job_id):
     if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], int):
         return result
     _, manifest = result
+    manifest = dict(manifest) if manifest else {}
+    stage = manifest.get("stage", "")
+    # 根据管线阶段计算进度百分比，供前端进度条使用
+    stage_bounds = {
+        "upload": (2, 8), "directory_mineru": (8, 18), "document_mineru": (18, 28),
+        "directory_parse": (28, 38), "split_pdfs": (38, 48), "record_mineru": (48, 88),
+        "validation": (88, 93), "case_json": (93, 97), "graphrag": (97, 99), "completed": (100, 100),
+    }
+    progress = 0
+    if stage:
+        lo, hi = stage_bounds.get(stage, (0, 0))
+        progress = lo
+        # record_mineru 阶段根据已完成子目录数细化进度
+        if stage == "record_mineru":
+            record_dir = manifest.get("outputs", {}).get("record_mineru_dir", "")
+            if record_dir:
+                try:
+                    total_dirs = sum(1 for _ in os.scandir(record_dir) if _.is_dir())
+                    completed_dirs = sum(
+                        1 for _ in os.scandir(record_dir)
+                        if _.is_dir() and any(
+                            f.endswith(".md") for f in os.listdir(_.path)
+                        )
+                    )
+                    if total_dirs > 0:
+                        progress = lo + int((hi - lo) * completed_dirs / total_dirs)
+                except Exception:
+                    pass
+        else:
+            progress = lo
+    manifest["_progress"] = progress
+    manifest["_stage_bounds"] = stage_bounds
     return jsonify({"manifest": manifest})
 
 
@@ -2296,20 +2461,22 @@ def _load_material_job_manifest(job_id, case_id=""):
         return jsonify({"error": "任务不存在"}), 404
 
     manifest_value = job.get("manifest", "")
-    if not manifest_value:
-        return jsonify({"error": "任务清单不存在"}), 404
-
     material_jobs_dir = (AI_STORE.base_dir / "runtime" / "material_jobs").resolve()
-    try:
-        manifest_path = Path(manifest_value).resolve(strict=True)
-        manifest_path.relative_to(material_jobs_dir)
-    except ValueError:
-        return jsonify({"error": "任务清单路径不在材料任务目录内"}), 403
-    except OSError:
-        return jsonify({"error": "任务清单文件不存在"}), 404
-
-    if manifest_path.name != "manifest.json":
-        return jsonify({"error": "任务清单文件名无效"}), 403
+    if manifest_value:
+        try:
+            manifest_path = Path(manifest_value).resolve(strict=True)
+            manifest_path.relative_to(material_jobs_dir)
+        except ValueError:
+            return jsonify({"error": "任务清单路径不在材料任务目录内"}), 403
+        except OSError:
+            return jsonify({"error": "任务清单文件不存在"}), 404
+        if manifest_path.name != "manifest.json":
+            return jsonify({"error": "任务清单文件名无效"}), 403
+    else:
+        # 运行中任务尚未记录 manifest 路径，按标准路径查找
+        manifest_path = material_jobs_dir / job_id / "manifest.json"
+        if not manifest_path.exists():
+            return jsonify({"error": "任务清单不存在"}), 404
 
     try:
         with open(manifest_path, "r", encoding="utf-8") as fh:
@@ -3283,23 +3450,30 @@ def api_evidence_parse():
     if not directory:
         return jsonify({"error": "未找到证据目录，请先完成建库或刷新证据目录"}), 400
 
-    # 从 manifest 获取 raw_pdf
-    manifest = None
-    for job in reversed(AI_STORE.get_jobs()):
-        if job.get("case") == case_id and job.get("type") == "material_auto_build":
-            try:
-                _, manifest = _load_material_job_manifest(job["id"], case_id)
-            except Exception:
-                pass
-            if manifest:
-                break
+    # 优先取案件 JSON 里的 _raw_pdf（缓存副本，不受用户删除原始文件影响）
+    raw_pdf = (data.get("_raw_pdf") or "").strip()
+    if raw_pdf:
+        raw_pdf_obj = Path(raw_pdf)
+        if not raw_pdf_obj.is_absolute():
+            raw_pdf_obj = (BASE_DIR / raw_pdf_obj).resolve()
+        raw_pdf = str(raw_pdf_obj) if raw_pdf_obj.is_file() else ""
 
-    if not manifest:
-        return jsonify({"error": "未找到建库记录"}), 400
+    # 回退：从建库 manifest 找原始路径
+    if not raw_pdf:
+        for job in reversed(AI_STORE.get_jobs()):
+            if job.get("case") == case_id and job.get("type") == "material_auto_build":
+                try:
+                    _, manifest = _load_material_job_manifest(job["id"], case_id)
+                    if manifest:
+                        raw_pdf = (manifest.get("params") or {}).get("raw_pdf") or ""
+                        if raw_pdf and os.path.isfile(raw_pdf):
+                            break
+                        raw_pdf = ""
+                except Exception:
+                    pass
 
-    raw_pdf = (manifest.get("params") or {}).get("raw_pdf") or ""
-    if not raw_pdf or not os.path.isfile(raw_pdf):
-        return jsonify({"error": "建库原始 PDF 不存在，无法切分证据"}), 400
+    if not raw_pdf:
+        return jsonify({"error": "未找到原始证据卷 PDF。请编辑案件 JSON 添加 _raw_pdf 字段，或重新通过 Web 页面建库。"}), 400
 
     # 创建解析任务
     selected = [d for d in directory if d.get("index") in entries]
